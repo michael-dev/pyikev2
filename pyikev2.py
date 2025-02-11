@@ -31,10 +31,14 @@ parser.add_argument('--no-indent', '-ni', action='store_true',
 parser.add_argument('--version', action='version', version='%(prog)s {}'.format(__version__))
 parser.add_argument('--disableXfrm', action='store_true')
 parser.add_argument('--eapTlsPassThrough', action='store_true')
+parser.add_argument('--natt', action='store_true')
+parser.add_argument('--floatport', action='store_true')
 args = parser.parse_args()
 
 disableXfrm = args.disableXfrm
 eapTlsPassThrough = args.eapTlsPassThrough
+natt = args.natt
+floatport = args.floatport
 
 # Get the listening IP addresses
 ip_addresses = []
@@ -77,7 +81,7 @@ except ConfigurationError as ex:
     sys.exit(1)
 
 # create IkeSaController
-ike_sa_controller = IkeSaController(ip_addresses, configuration, disableXfrm, listen_port, eapTlsPassThrough)
+ike_sa_controller = IkeSaController(ip_addresses, configuration, disableXfrm, listen_port, eapTlsPassThrough, natt, floatport)
 
 def signal_handler(*unused):
     print('SIGINT received. Exiting.')

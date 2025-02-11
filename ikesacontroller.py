@@ -18,7 +18,7 @@ __author__ = 'Alejandro Perez-Mendez <alejandro.perez.mendez@gmail.com>'
 
 
 class IkeSaController:
-    def __init__(self, my_addrs, configuration, disableXfrm, my_port, eapTlsPassThrough):
+    def __init__(self, my_addrs, configuration, disableXfrm, my_port, eapTlsPassThrough, natt, floatport):
         self.ike_sas = []
         self.configuration = configuration
         self.my_addrs = my_addrs
@@ -28,6 +28,8 @@ class IkeSaController:
         # establish policies
         self.disableXfrm = disableXfrm
         self.eapTlsPassThrough = eapTlsPassThrough
+        self.natt = natt
+        self.floatport = floatport
         if not self.disableXfrm:
             xfrm.Xfrm.flush_policies()
             xfrm.Xfrm.flush_sas()
@@ -125,11 +127,20 @@ class IkeSaController:
     def main_loop(self):
         # create network sockets
         udp_sockets = {}
-        port = int(self.my_port) if self.my_port is not None else 500
+        port = int(self.my_port) if self.my_port is not None else 4500 if self.natt else 500
+        udpsockmap = {}
         for addr in self.my_addrs:
             logging.info(f'Listening from [{addr}]:{port}')
-            udp_sockets[addr] = socket.socket(socket.AF_INET6 if addr.version == 6 else socket.AF_INET, socket.SOCK_DGRAM)
-            udp_sockets[addr].bind((str(addr), port))
+            sock1= socket.socket(socket.AF_INET6 if addr.version == 6 else socket.AF_INET, socket.SOCK_DGRAM)
+            sock1.bind((str(addr), port))
+            udp_sockets[addr] = sock1
+            if self.floatport:
+                port2 = port + 1 if port > 0 else 0
+                logging.info(f'Listening from [{addr}]:{port2} (floating port)')
+                sock2= socket.socket(socket.AF_INET6 if addr.version == 6 else socket.AF_INET, socket.SOCK_DGRAM)
+                sock2.bind((str(addr), port2))
+                udp_sockets[str(addr)+"-2"] = sock2
+                udpsockmap[sock1] = sock2
 
         self.control_socket = control_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.control_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -168,7 +179,8 @@ class IkeSaController:
                                peer_addr=ike_conf.peer_addr, disableXfrm = self.disableXfrm)
                 self.ike_sas.append(ike_sa)
                 reply_data = ike_sa.connect()
-                dst_addr = (str(ike_conf.peer_addr), 500)
+                dst_addr = (str(ike_conf.peer_addr), 500 if not self.natt else 4500)
+                reply_data = bytes(4) + reply_data if self.natt else reply_data
                 udp_sockets[ike_conf.my_addr].sendto(reply_data, dst_addr)
 
         # do server
@@ -178,9 +190,15 @@ class IkeSaController:
                 for my_addr, sock in udp_sockets.items():
                     if sock in readable:
                         data, peer_addr = sock.recvfrom(4096)
+                        if self.natt:
+                            if data[0:4] != bytes(4):
+                                raise Exception("unecapsulated data received")
+                            data = data[4:]
                         data = self.dispatch_message(data, my_addr, peer_addr[0])
+                        outsock = sock if sock not in udpsockmap else udpsockmap[sock]
                         if data:
-                            sock.sendto(data, peer_addr)
+                            data = bytes(4) + data if self.natt else data
+                            outsock.sendto(data, peer_addr)
 
                 if xfrm_socket in readable and not disableXfrm:
                     data = xfrm_socket.recv(4096)
@@ -191,7 +209,8 @@ class IkeSaController:
                     elif header.type == xfrm.XFRM_MSG_EXPIRE:
                         reply_data, my_addr, peer_addr = self.process_expire(msg)
                     if reply_data:
-                        dst_addr = (str(peer_addr), 500)
+                        dst_addr = (str(peer_addr), 500 if not self.natt else 4500)
+                        reply_data = bytes(4) + reply_data if self.natt else reply_data
                         udp_sockets[my_addr].sendto(reply_data, dst_addr)
 
                 if control_socket in readable:
@@ -211,7 +230,8 @@ class IkeSaController:
                                        peer_addr=ike_conf.peer_addr, disableXfrm = self.disableXfrm, eapTlsClientSocket = conn)
                         self.ike_sas.append(ike_sa)
                         reply_data = ike_sa.connect()
-                        dst_addr = (str(ike_conf.peer_addr), 500)
+                        dst_addr = (str(ike_conf.peer_addr), 500 if not self.natt else 4500)
+                        reply_data = bytes(4) + reply_data if self.natt else reply_data
                         udp_sockets[ike_conf.my_addr].sendto(reply_data, dst_addr)
 
 
@@ -219,7 +239,8 @@ class IkeSaController:
                 for ikesa in self.ike_sas:
                     request_data = ikesa.check_retransmission_timer()
                     if request_data:
-                        dst_addr = (str(ikesa.peer_addr), 500)
+                        dst_addr = (str(ikesa.peer_addr), 500 if not self.natt else 4500)
+                        request_data = bytes(4) + request_data if self.natt else request_data
                         udp_sockets[ikesa.my_addr].sendto(request_data, dst_addr)
                     if ikesa.state == IkeSa.State.DELETED:
                         ikesa.before_remove()
@@ -230,14 +251,16 @@ class IkeSaController:
                 for ikesa in self.ike_sas:
                     request_data = ikesa.check_dead_peer_detection_timer()
                     if request_data:
-                        dst_addr = (str(ikesa.peer_addr), 500)
+                        dst_addr = (str(ikesa.peer_addr), 500 if not self.natt else 4500)
+                        request_data = bytes(4) + request_data if self.natt else request_data
                         udp_sockets[ikesa.my_addr].sendto(request_data, dst_addr)
 
                 # start IKE_SA rekeyings
                 for ikesa in self.ike_sas:
                     request_data = ikesa.check_rekey_ike_sa_timer()
                     if request_data:
-                        dst_addr = (str(ikesa.peer_addr), 500)
+                        dst_addr = (str(ikesa.peer_addr), 500 if not self.natt else 4500)
+                        request_data = bytes(4) + request_data if self.natt else request_data
                         udp_sockets[ikesa.my_addr].sendto(request_data, dst_addr)
 
             except socket.gaierror as ex:

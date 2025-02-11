@@ -446,3 +446,8 @@ test-tunnel:
 ```sslscan 127.0.0.1:8443```
 
 * connect to pyikve2 and scan the EAP-TLS TLS-Server settings (TLS versions and ciphers supported)
+
+## NAT-T and Float-Port
+
+* --natt enables UDP encapsulation and decapsulation for IKE messages (ESP XFRM config missing)
+* --floatport enables changing UDP port before IKE AUTH phase
